@@ -1,0 +1,390 @@
+---
+title: "OESTM_Monocle"
+output: html_document
+date: "2025-02-19"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load, echo = FALSE, warning = FALSE, message = FALSE}
+suppressMessages(library(Seurat))
+suppressMessages(library(ggplot2))
+suppressMessages(library(cowplot))
+suppressMessages(library(patchwork))
+suppressMessages(library(data.table))
+suppressMessages(library(viridis))
+suppressMessages(library(harmony))
+suppressMessages(library(dplyr))
+suppressMessages(library(monocle3))
+suppressMessages(library(SeuratWrappers))
+set.seed(626)
+seu <- readRDS('../Data/OESTM_240225.rds')
+```
+
+Get Basal Epithelial Cells and preprocess
+```{r}
+seu <- subset(seu,subset = celltype == 'Basal Epithelial')
+seu@meta.data <- seu@meta.data[, !grepl("^Leiden*", colnames(seu@meta.data))]
+seu <- NormalizeData(seu,assay = 'RNA')
+seu <- FindVariableFeatures(seu,nfeatures = 3000)
+seu <- ScaleData(seu)
+seu <- RunPCA(seu,npcs = 50,seed.use = 42)
+seu <- RunHarmony(seu,group.by.vars = 'tissue')
+seu <- RunUMAP(seu,dims = 1:10,min.dist = 0.4,reduction = 'harmony',
+               seed.use = 42)
+DimPlot(seu,group.by = 'tissue',label = TRUE)+
+   theme(
+     axis.title = element_blank(),  
+     axis.text = element_blank(),    
+     axis.ticks = element_blank(),   
+     axis.line = element_blank()       
+   )
+```
+
+```{r,fig.width=7,fig.height=7}
+seu <- FindNeighbors(seu,reduction = 'harmony',dims = 1:10)
+seu <- FindClusters(seu,resolution = 0.5,cluster.name = 'Leiden_res.0.5')
+DimPlot(seu,group.by = 'Leiden_res.0.5',label = TRUE)+
+   theme(
+     axis.title = element_blank(),  
+     axis.text = element_blank(),    
+     axis.ticks = element_blank(),    
+     axis.line = element_blank()       
+   )
+```
+
+Monocle3
+```{r}
+seu$barcode <- NULL
+seu$sample_name <- NULL
+seu$samplename_batch <- NULL
+cds <- as.cell_data_set(seu)
+rowData(cds)$gene_short_name <- rownames(cds)
+cds <- preprocess_cds(cds)
+cds <- cluster_cells(cds,random_seed = 626)
+cds <- learn_graph(cds)
+cds <- order_cells(cds)
+cds$pseudotime <- pseudotime(cds)
+seu[["pseudotime"]] <- colData(cds)[, "pseudotime", drop = TRUE]
+FeaturePlot(seu, features = "pseudotime", raster = FALSE) +
+    scale_color_viridis()
+
+cds_pr_test_res <- graph_test(cds, 
+                            neighbor_graph="principal_graph")
+
+
+cds_df <- cds_pr_test_res %>%
+  filter(q_value < 0.05 & status == 'OK') %>%
+  arrange(desc(morans_I))
+
+genes <- rownames(cds_df)[1:1500]
+```
+
+```{r,warning = FALSE,message=FALSE}
+library(ComplexHeatmap)
+library(circlize)
+library(RColorBrewer)
+
+# Prep for BEAM style heatmap
+seu <- subset(seu, subset= Leiden_res.0.5 %in% c(0,1,2,3,4,5,6,7,8,9))
+exp_data <- GetAssayData(seu, layer = "data")[genes,]
+md <- seu@meta.data
+md$Cells <- rownames(md)
+md <- md[!is.infinite(md$pseudotime) & !is.na(md$pseudotime), ]
+gene_var <- apply(exp_data[genes, , drop = FALSE], 1, var)
+deg <- genes[genes %in% names(gene_var)[gene_var > 0.1]]
+
+n_bins <- 100
+smoothed_list <- list()
+annotation_bins <- list()
+
+# BRANCH-WISE SMOOTHING # B1 is basal, B2 is Tumour
+for (branch in c('B1', 'B2')) {
+  if (branch == 'B1') {
+    df <- md[md$Leiden_res.0.5 %in% c(1,4,5,7,3),  ] 
+    df <- df[order(-df$pseudotime), ]       # Order pseudotime in decreasing order
+  } else {
+    df <- md[md$Leiden_res.0.5 %in% c(0,1,2,3,6,9,8),  ]  
+    df <- df[order(df$pseudotime), ]        # Order pseudotime in increasing order
+  }
+  df$norm_pt <- (df$pseudotime - min(df$pseudotime)) / (max(df$pseudotime) - min(df$pseudotime)) # Normalize to 1
+  
+  x_bins <- seq(0, 1, length.out = n_bins)
+  branch_mat <- matrix(NA, nrow = length(deg), ncol = n_bins,
+                       dimnames = list(deg, paste0(branch, "_bin", seq_len(n_bins))))
+  
+  for (i in seq_along(deg)) {
+    gene <- deg[i]
+    y <- exp_data[gene, df$Cells]
+    smooth_df <- data.frame(x = df$norm_pt, y = y)
+    smooth_df <- smooth_df[complete.cases(smooth_df), ]
+    if (nrow(smooth_df) > 10 && length(unique(smooth_df$y)) > 1) {
+      try({
+        fit <- loess(y ~ x, data = smooth_df, span = 2) # loess smoothing
+        preds <- predict(fit, newdata = data.frame(x = x_bins))
+        branch_mat[i, ] <- preds
+      }, silent = TRUE)
+    }
+  }
+  
+  if (branch == 'B1') {
+    branch_mat <- branch_mat[, rev(seq_len(ncol(branch_mat)))]
+  }
+  
+  smoothed_list[[branch]] <- branch_mat
+  annotation_bins[[branch]] <- data.frame(
+    Branch = branch,
+    Pseudotime = if (branch == 'B1') rev(x_bins) else x_bins,
+    row.names = colnames(branch_mat)
+  )
+}
+
+
+smoothed <- do.call(cbind, smoothed_list)
+annotation_df <- do.call(rbind, annotation_bins)
+rownames(annotation_df) <- gsub(".*\\.", "", rownames(annotation_df))
+scaled <- t(scale(t(smoothed)))
+
+
+branch_colours <- setNames(brewer.pal(3, "Set1")[1:2], c('B1', 'B2'))
+pseudotime_colours <- circlize::colorRamp2(seq(0, 1, length.out = 100), viridis(100))
+annotation_colours <- list(
+  Branch = branch_colours,
+  Pseudotime = pseudotime_colours
+)
+ha <- HeatmapAnnotation(
+  Branch = annotation_df$Branch,
+  Pseudotime = annotation_df$Pseudotime,
+  col = annotation_colours,
+  show_annotation_name = TRUE
+)
+
+#heatmap params
+set.seed(123) 
+k <- 15
+km <- kmeans(scaled, centers = k)
+
+module_labels <- factor(km$cluster)
+combined_modules <- split(rownames(scaled), module_labels)
+names(combined_modules) <- seq_along(combined_modules)
+
+pdf("../PST/PST_Pre_AUG25_top1500.pdf", width = 10, height = 25)
+ht <- draw(
+  Heatmap(
+    scaled,
+    name = "Expression",
+    col = colorRamp2(seq(-3, 3, length.out = 100), viridis(100)),
+    show_row_names = FALSE,
+    show_column_names = FALSE,
+    cluster_rows = TRUE,
+    cluster_columns = FALSE,
+    row_split = module_labels,
+    column_split = factor(annotation_df$Branch, levels = c('B1', 'B2')),
+    top_annotation = ha,
+    use_raster = TRUE,
+    raster_device = "png",
+    row_title_gp = gpar(fontsize = 12)
+  ),
+  heatmap_legend_side = "right",
+  annotation_legend_side = "right"
+)
+rd <- row_order(ht)
+dev.off()
+
+split_order <- names(rd)
+combined_modules <- combined_modules[split_order]
+
+# ---- MODULE PLOTS FROM SMOOTHED MATRIX ----
+module_plots <- list()
+
+all_expr <- unlist(lapply(combined_modules, function(s.genes) {
+  unlist(lapply(c('B1', 'B2'), function(branch) {
+    bin_cols <- grep(branch, colnames(scaled), value = TRUE)
+    mat <- scaled[s.genes, bin_cols, drop = FALSE]
+    colMeans(mat, na.rm = TRUE)
+  }))
+}))
+y.lim <- range(all_expr, na.rm = TRUE)
+
+for (i in seq_along(combined_modules)) {
+  module_name <- names(combined_modules)[i]
+  s.genes <- combined_modules[[i]]
+  plot_list <- list()
+  
+  for (branch in c('B1', 'B2')) {
+    bin_cols <- grep(branch, colnames(scaled), value = TRUE)
+    bin_values <- annotation_df[bin_cols, "Pseudotime"]
+    
+    mat <- scaled[s.genes, bin_cols, drop = FALSE]
+    avg_expr <- colMeans(mat, na.rm = TRUE)
+    
+    df_plot <- data.frame(
+      Pseudotime = bin_values,
+      Avg_Expression = avg_expr
+    )
+    
+    colour <- ifelse(branch == "B1", "red", "blue")
+    p <- ggplot(df_plot, aes(x = Pseudotime, y = Avg_Expression)) +
+    geom_line(color = colour, linewidth = 1) +
+    theme_classic(base_size = 7) +
+    labs(title = branch, x = "Normalised Pseudotime", y = "Average expression") +
+    theme(
+      plot.title = element_text(hjust = 0.5),
+      panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.3),
+      axis.line = element_blank(), 
+      axis.title = element_text(size = 7),
+      axis.text = element_text(size = 5)
+    ) +
+    scale_y_continuous(
+      breaks = pretty(y.lim, n = 6),
+      labels = function(x) sprintf("%.2f", x),
+    limits = y.lim
+    )
+    
+    if (branch == 'B1') {
+      p <- p + scale_x_reverse()
+    }
+    
+    plot_list[[branch]] <- p
+  }
+  
+  combined_plot <- wrap_plots(plot_list, ncol = 2) +
+    plot_annotation(
+      title = module_name,
+      theme = theme(plot.title = element_text(hjust = 0.5, size = 8))
+    )
+  
+  module_plots[[module_name]] <- combined_plot
+}
+
+library(grid)
+library(gridExtra)
+
+ordered_plot_list <- module_plots[names(combined_modules)]
+pt <- plot_grid(plotlist = ordered_plot_list, ncol = 1)
+pt_grob <- ggplotGrob(pt)
+
+pdf("../PST/PST_BEAM_Module_aug25_top1500_Heatmap.pdf", width = 14, height = 25)
+pushViewport(viewport(layout = grid.layout(1, 2, widths = unit(c(2/3, 1/3), "npc"))))
+
+pushViewport(viewport(layout.pos.row = 1, layout.pos.col = 1))
+draw(ht, newpage = FALSE)
+popViewport()
+
+pushViewport(viewport(layout.pos.row = 1, layout.pos.col = 2))
+grid.draw(pt_grob)
+popViewport(2)
+
+dev.off()
+
+```
+
+```{r}
+module_summary <- data.frame(
+  Module = character(),
+  Branch = character(),
+  Start_Mean = numeric(),
+  End_Mean = numeric(),
+  Delta = numeric(),
+  stringsAsFactors = FALSE
+)
+
+for (i in seq_along(combined_modules)) {
+  module_name <- names(combined_modules)[i]
+  s.genes <- intersect(combined_modules[[i]], rownames(scaled))  # ensure genes are present
+  
+  for (branch in c("B1", "B2")) {
+    bin_cols <- grep(branch, colnames(scaled), value = TRUE)
+    bin_values <- annotation_df[bin_cols, "Pseudotime"]
+    
+    mat <- scaled[s.genes, bin_cols, drop = FALSE]
+    avg_expr <- colMeans(mat, na.rm = TRUE)
+    
+    df <- data.frame(
+      Pseudotime = bin_values,
+      Avg_Expression = avg_expr
+    )
+    df <- df[order(df$Pseudotime), ]
+    
+    n <- nrow(df)
+    start_idx <- 1:floor(0.1 * n)
+    end_idx <- (n - floor(0.1 * n) + 1):n
+    
+    start_mean <- mean(df$Avg_Expression[start_idx], na.rm = TRUE)
+    end_mean <- mean(df$Avg_Expression[end_idx], na.rm = TRUE)
+    
+    module_summary <- rbind(module_summary, data.frame(
+      Module = module_name,
+      Branch = branch,
+      Start_Mean = start_mean,
+      End_Mean = end_mean,
+      Delta = end_mean - start_mean
+    ))
+  }
+}
+
+write.csv(module_summary, "../PST_AUG25/PST_HMAP_module_Stats_Aug25_top1500_10p.csv", row.names = FALSE)
+```
+
+```{r}
+library(openxlsx)
+wb <- createWorkbook()
+
+for (mod_name in names(combined_modules)) {
+  gene_list <- combined_modules[[mod_name]]
+  df <- data.frame(Gene = gene_list, stringsAsFactors = FALSE)
+  addWorksheet(wb, sheetName = mod_name)
+  writeData(wb, sheet = mod_name, x = df)
+}
+saveWorkbook(wb, file = "../PST/genes_by_module_aug25.xlsx", overwrite = TRUE)
+```
+
+```{r}
+saveRDS(seu,'Monocle_epi.rds')
+saveRDS(combined_modules,'../Data/Aug25_Heatmap_modules_pst.rds')
+save.image('../Data/Aug25_NascentTumor_Monocle.RData')
+```
+
+```{r}
+library(GSEABase)
+library(AUCell)
+library(EnhancedVolcano)
+sseu <- readRDS('../Data/Monocle_epi.rds')
+```
+
+```{r,fig.width=34,fig.height=17}
+library(AUCell)
+library(Seurat)
+library(ggplot2)
+library(cowplot)
+
+plotlist <- list()
+expr_matrix <- GetAssayData(sseu, slot = "counts")
+cells_rankings <- AUCell_buildRankings(expr_matrix, plotStats = TRUE)
+
+for (i in names(combined_modules)) {
+  geneSet <- GeneSet(combined_modules[[i]], setName = 'ModSig')
+  geneSets <- GeneSetCollection(list(geneSet))
+  cells_AUC <- AUCell_calcAUC(geneSets, cells_rankings)
+  auc_matrix <- getAUC(cells_AUC)
+  threshold <- quantile(auc_matrix["ModSig", ], 0.8)
+  sseu[[paste0("Mod", i, "Sig_Call")]] <- ifelse(
+    auc_matrix["ModSig", colnames(sseu)] > threshold,
+    paste0("Mod ", i, " Active"),
+    paste0("Mod ", i, " Inactive")
+  )
+  
+  plot <- DimPlot(sseu, group.by = paste0("Mod", i, "Sig_Call"),pt.size = 1) +
+    ggtitle(paste("Module", i))
+  plotlist[[i]] <- plot
+}
+
+# Combine plots
+pdf(file = '../PST/AUCell_AllModules_UMAP.pdf',width = 30,height = 15)
+plot_grid(plotlist = plotlist, ncol = 4)
+dev.off()
+```
+
+
