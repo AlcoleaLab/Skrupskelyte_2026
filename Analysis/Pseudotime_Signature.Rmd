@@ -1,7 +1,11 @@
 ---
-title: "OESTM_Monocle"
+title: "Pseudotime_Signature"
+subtitle: "Trajectory and Module Analysis"
+author: "Harikrishnan Ajith"
+affiliation: "Alcolea Lab, University of Cambridge"
+email: "ha573@cam.ac.uk"
 output: html_document
-date: "2025-02-19"
+date: "2025-09-01"
 ---
 
 ```{r setup, include=FALSE}
