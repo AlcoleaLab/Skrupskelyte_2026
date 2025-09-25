@@ -29,8 +29,9 @@ seu <- readRDS('../Data/OESTM_240225.rds')
 
 Get Basal Epithelial Cells and preprocess
 ```{r}
+seu <- NormalizeData(seu)
+seu <- ScaleData(seu)
 bseu <- subset(seu,subset = celltype == 'Basal Epithelial')
-bseu@meta.data <- bseu@meta.data[, !grepl("^Leiden*", colnames(bseu@meta.data))]
 bseu <- NormalizeData(bseu,assay = 'RNA')
 bseu <- FindVariableFeatures(bseu,nfeatures = 3000)
 bseu <- ScaleData(bseu)
@@ -46,7 +47,7 @@ DimPlot(bseu,group.by = 'tissue',label = TRUE)+
      axis.line = element_blank()       
    )
 ```
-
+Clustering
 ```{r,fig.width=7,fig.height=7}
 bseu <- FindNeighbors(bseu,reduction = 'harmony',dims = 1:10)
 bseu <- FindClusters(bseu,resolution = 0.5,cluster.name = 'Leiden_res.0.5')
@@ -86,6 +87,7 @@ cds_df <- cds_pr_test_res %>%
 genes <- rownames(cds_df)[1:1500]
 ```
 
+Branchwise Pseudotime ordered Heatmap
 ```{r,warning = FALSE,message=FALSE}
 library(ComplexHeatmap)
 library(circlize)
@@ -105,8 +107,8 @@ smoothed_list <- list()
 annotation_bins <- list()
 
 # BRANCH-WISE SMOOTHING # B1 is basal, B2 is Tumour
-for (branch in c('B1', 'B2')) {
-  if (branch == 'B1') {
+for (branch in c('Basal', 'Tumour')) {
+  if (branch == 'Basal') {
     df <- md[md$Leiden_res.0.5 %in% c(1,4,5,7,3),  ] 
     df <- df[order(-df$pseudotime), ]       # Order pseudotime in decreasing order
   } else {
@@ -133,14 +135,14 @@ for (branch in c('B1', 'B2')) {
     }
   }
   
-  if (branch == 'B1') {
+  if (branch == 'Basal') {
     branch_mat <- branch_mat[, rev(seq_len(ncol(branch_mat)))]
   }
   
   smoothed_list[[branch]] <- branch_mat
   annotation_bins[[branch]] <- data.frame(
     Branch = branch,
-    Pseudotime = if (branch == 'B1') rev(x_bins) else x_bins,
+    Pseudotime = if (branch == 'Basal') rev(x_bins) else x_bins,
     row.names = colnames(branch_mat)
   )
 }
@@ -152,7 +154,7 @@ rownames(annotation_df) <- gsub(".*\\.", "", rownames(annotation_df))
 scaled <- t(scale(t(smoothed)))
 
 
-branch_colours <- setNames(brewer.pal(3, "Set1")[1:2], c('B1', 'B2'))
+branch_colours <- setNames(brewer.pal(3, "Set1")[1:2], c('Basal', 'Tumour'))
 pseudotime_colours <- circlize::colorRamp2(seq(0, 1, length.out = 100), viridis(100))
 annotation_colours <- list(
   Branch = branch_colours,
@@ -174,7 +176,7 @@ module_labels <- factor(km$cluster)
 combined_modules <- split(rownames(scaled), module_labels)
 names(combined_modules) <- seq_along(combined_modules)
 
-pdf("../PST/PST_Pre_AUG25_top1500.pdf", width = 10, height = 25)
+pdf("PST_top1500.pdf", width = 10, height = 25)
 ht <- draw(
   Heatmap(
     scaled,
@@ -185,7 +187,7 @@ ht <- draw(
     cluster_rows = TRUE,
     cluster_columns = FALSE,
     row_split = module_labels,
-    column_split = factor(annotation_df$Branch, levels = c('B1', 'B2')),
+    column_split = factor(annotation_df$Branch, levels = c('Basal', 'Tumour')),
     top_annotation = ha,
     use_raster = TRUE,
     raster_device = "png",
@@ -204,7 +206,7 @@ combined_modules <- combined_modules[split_order]
 module_plots <- list()
 
 all_expr <- unlist(lapply(combined_modules, function(s.genes) {
-  unlist(lapply(c('B1', 'B2'), function(branch) {
+  unlist(lapply(c('Basal', 'Tumour'), function(branch) {
     bin_cols <- grep(branch, colnames(scaled), value = TRUE)
     mat <- scaled[s.genes, bin_cols, drop = FALSE]
     colMeans(mat, na.rm = TRUE)
@@ -217,7 +219,7 @@ for (i in seq_along(combined_modules)) {
   s.genes <- combined_modules[[i]]
   plot_list <- list()
   
-  for (branch in c('B1', 'B2')) {
+  for (branch in c('Basal', 'Tumour')) {
     bin_cols <- grep(branch, colnames(scaled), value = TRUE)
     bin_values <- annotation_df[bin_cols, "Pseudotime"]
     
@@ -229,7 +231,7 @@ for (i in seq_along(combined_modules)) {
       Avg_Expression = avg_expr
     )
     
-    colour <- ifelse(branch == "B1", "red", "blue")
+    colour <- ifelse(branch == "Basal", "red", "blue")
     p <- ggplot(df_plot, aes(x = Pseudotime, y = Avg_Expression)) +
     geom_line(color = colour, linewidth = 1) +
     theme_classic(base_size = 7) +
@@ -247,7 +249,7 @@ for (i in seq_along(combined_modules)) {
     limits = y.lim
     )
     
-    if (branch == 'B1') {
+    if (branch == 'Basal') {
       p <- p + scale_x_reverse()
     }
     
@@ -270,7 +272,7 @@ ordered_plot_list <- module_plots[names(combined_modules)]
 pt <- plot_grid(plotlist = ordered_plot_list, ncol = 1)
 pt_grob <- ggplotGrob(pt)
 
-pdf("../PST/PST_BEAM_Module_aug25_top1500_Heatmap.pdf", width = 14, height = 25)
+pdf("PST_Module_top1500_Heatmap.pdf", width = 14, height = 25)
 pushViewport(viewport(layout = grid.layout(1, 2, widths = unit(c(2/3, 1/3), "npc"))))
 
 pushViewport(viewport(layout.pos.row = 1, layout.pos.col = 1))
@@ -299,7 +301,7 @@ for (i in seq_along(combined_modules)) {
   module_name <- names(combined_modules)[i]
   s.genes <- intersect(combined_modules[[i]], rownames(scaled))  # ensure genes are present
   
-  for (branch in c("B1", "B2")) {
+  for (branch in c("Basal", "Tumour")) {
     bin_cols <- grep(branch, colnames(scaled), value = TRUE)
     bin_values <- annotation_df[bin_cols, "Pseudotime"]
     
@@ -329,7 +331,7 @@ for (i in seq_along(combined_modules)) {
   }
 }
 
-write.csv(module_summary, "../PST_AUG25/PST_HMAP_module_Stats_Aug25_top1500_10p.csv", row.names = FALSE)
+write.csv(module_summary, "PST_HMAP_module_Stats_top1500.csv", row.names = FALSE)
 ```
 
 ```{r}
@@ -342,13 +344,12 @@ for (mod_name in names(combined_modules)) {
   addWorksheet(wb, sheetName = mod_name)
   writeData(wb, sheet = mod_name, x = df)
 }
-saveWorkbook(wb, file = "../PST/genes_by_module_aug25.xlsx", overwrite = TRUE)
+saveWorkbook(wb, file = "genes_by_module.xlsx", overwrite = TRUE)
 ```
 
 ```{r}
-saveRDS(bseu,'Monocle_epi.rds')
-saveRDS(combined_modules,'../Data/Aug25_Heatmap_modules_pst.rds')
-save.image('../Data/Aug25_NascentTumor_Monocle.RData')
+saveRDS(bseu,'../Data/Monocle_epi.rds')
+saveRDS(combined_modules,'../Data/Heatmap_modules_pst.rds')
 ```
 
 ```{r}
@@ -358,6 +359,7 @@ library(EnhancedVolcano)
 sseu <- subset(bseu,subset = condition %in% c('Tumour','DEN'))
 ```
 
+# Modules enriched in Tumour will change from 12 and 1 as reported, on each run change downstream as required.
 ```{r,fig.width=34,fig.height=17}
 library(AUCell)
 library(Seurat)
@@ -386,9 +388,34 @@ for (i in names(combined_modules)) {
 }
 
 # Combine plots
-pdf(file = '../PST/AUCell_AllModules_UMAP.pdf',width = 30,height = 15)
+pdf(file = 'AUCell_AllModules_UMAP.pdf',width = 30,height = 15)
 plot_grid(plotlist = plotlist, ncol = 4)
 dev.off()
+```
+
+```{r,fig.width=8,fig.height=6}
+table(sseu$Mod12Sig_Call,sseu$Mod1Sig_Call)
+
+sseu$tumour_groups <- ifelse(
+  sseu$Mod12Sig_Call == 'Mod 12 Active' & sseu$Mod1Sig_Call == 'Mod 1 Active', 'Tumour 12',
+  ifelse(
+    sseu$Mod1Sig_Call == 'Mod 1 Active', 'Tumour 1',
+    ifelse(
+      sseu$Mod12Sig_Call == 'Mod 12 Active', 'Tumour 12',
+      'Other'
+    )
+  )
+)
+
+table(sseu$tumour_groups)
+
+pdf(file = 'Populations_UMAP.pdf',width = 8,height = 6)
+DimPlot(sseu,group.by = 'tumour_groups',pt.size = 1)
+dev.off()
+```
+
+```{r}
+saveRDS(sseu,'../Data/Epi_Signature.rds')
 ```
 
 

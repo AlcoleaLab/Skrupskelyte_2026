@@ -25,9 +25,9 @@ sseu <- readRDS('../Data/Epi_Signature.rds')
 ```{r}
 cc_colors <- c('DEN FB' = '#6FDADA',
                'Tumour FB' = '#E07F80',
-               'Inactive' = '#9C80B2',
-               'Mod 12 Active' = '#D7E5ED',
-               'Mod 1 Active'= '#F6CBCB')
+               'Other' = '#9C80B2',
+               'Tumour 12' = '#D7E5ED',
+               'Tumour 1'= '#F6CBCB')
 
 
 ```
@@ -35,12 +35,12 @@ cc_colors <- c('DEN FB' = '#6FDADA',
 ```{r}
 C19 <- subset(seu,subset=Leiden_res.0.6 %in% c(19) & condition %in% c('Tumour','DEN'))
 C19$cc_condition <- ifelse(seu$condition == 'Tumour','Tumour FB','DEN FB')
-sseu$cc_condition <- sseu$A25_M12_M1
+sseu$cc_condition <- sseu$tumour_groups
 cseu <- merge(sseu,C19)
 cseu <- JoinLayers(cseu)
 
 unique(cseu$cc_condition)
-cseu$cc_condition <- factor(cseu$cc_condition,levels = c("Mod 12 Active","Mod 1 Active","Inactive","DEN FB","Tumour FB"))
+cseu$cc_condition <- factor(cseu$cc_condition,levels = c("Tumour 12","Tumour 1","Other","DEN FB","Tumour FB"))
 ```
 
 ```{r}
@@ -117,6 +117,7 @@ ht2 <- netAnalysis_signalingRole_heatmap(cellchat, pattern = "incoming",width = 
 ht1 + ht2
 dev.off()
 ```
+
 ```{r,fig.width=20, fig.height=10}
 ## Signaling role analysis on the cell-cell communication networks of interest
 ### 2. SET PATHWAYS 
