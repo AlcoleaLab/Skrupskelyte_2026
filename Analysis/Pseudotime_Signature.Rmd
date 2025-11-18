@@ -50,7 +50,7 @@ DimPlot(bseu,group.by = 'tissue',label = TRUE)+
 Clustering
 ```{r,fig.width=7,fig.height=7}
 bseu <- FindNeighbors(bseu,reduction = 'harmony',dims = 1:10)
-bseu <- FindClusters(bseu,resolution = 0.5,cluster.name = 'Leiden_res.0.5')
+bseu <- FindClusters(bseu,resolution = 0.5,cluster.name = 'Leiden_res.0.5',method='igraph',algorithm=4)
 DimPlot(bseu,group.by = 'Leiden_res.0.5',label = TRUE)+
    theme(
      axis.title = element_blank(),  
@@ -417,5 +417,6 @@ dev.off()
 ```{r}
 saveRDS(sseu,'../Data/Epi_Signature.rds')
 ```
+
 
 
